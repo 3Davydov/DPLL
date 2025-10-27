@@ -1,0 +1,5 @@
+*.cnf
+*.sh
+uf*/
+.vscode/
+dpll
