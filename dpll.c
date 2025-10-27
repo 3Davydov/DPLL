@@ -229,41 +229,41 @@ unit_propagate(Formula *formula)
 
 	printf("found single literal %d\n", target_literal);
 
-	// for (int i = 0; i < formula->nclauses; i++)
-	// {
-	// 	Clause *cl;
+	for (int i = 0; i < formula->nclauses; i++)
+	{
+		Clause *cl;
 
-	// 	if (formula->clauses[i].n_defined == 0)
-	// 		continue;
+		if (formula->clauses[i].n_defined == 0)
+			continue;
 
-	// 	cl = &formula->clauses[i];
-	// 	for (int j = 0; j < formula->nlit_per_clause; j++)
-	// 	{
-	// 		if (cl->literals[j] != target_literal)
-	// 			continue;
+		cl = &formula->clauses[i];
+		for (int j = 0; j < formula->nlit_per_clause; j++)
+		{
+			if (cl->literals[j] != target_literal)
+				continue;
 
-	// 		switch (cl->states[j])
-	// 		{
-	// 			case LIT_POS:
-	// 				if (value_to_assign == true)
-	// 					delete_clause_from_formula(formula, cl);
-	// 				else
-	// 					delete_lit_from_clause(cl, j);
-	// 				break;
-	// 			case LIT_NEG:
-	// 				if (value_to_assign == false)
-	// 					delete_clause_from_formula(formula, cl);
-	// 				else
-	// 					delete_lit_from_clause(cl, j);
-	// 				break;
-	// 			default:
-	// 				break;
-	// 		}
+			switch (cl->states[j])
+			{
+				case LIT_POS:
+					if (value_to_assign == true)
+						delete_clause_from_formula(formula, cl);
+					else
+						delete_lit_from_clause(cl, j);
+					break;
+				case LIT_NEG:
+					if (value_to_assign == false)
+						delete_clause_from_formula(formula, cl);
+					else
+						delete_lit_from_clause(cl, j);
+					break;
+				default:
+					break;
+			}
 
-	// 		/* Nothing left to do */
-	// 		break;
-	// 	}
-	// }
+			/* Nothing left to do */
+			break;
+		}
+	}
 
 	return 1;
 }
@@ -367,10 +367,7 @@ dpll(FILE *file, int nclauses, int nvariables)
 		i++;
 	}
 
-	// while (true)
-	// {
 	unit_propagate(formula);
-	// }
 
 	ret_code = 1; /* Success */
 
