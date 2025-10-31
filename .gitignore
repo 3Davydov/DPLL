@@ -1,5 +1,6 @@
 *.cnf
 *.sh
 uf*/
+uuf*/
 .vscode/
 dpll
