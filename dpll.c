@@ -89,6 +89,62 @@ typedef struct Formula
 	int				nlit_total;
 }		Formula;
 
+static void
+drop_formula(Formula *formula)
+{
+	if (formula == NULL)
+		return;
+
+	if (formula->clauses != NULL)
+		free(formula->clauses);
+
+	if (formula->literals != NULL)
+		free(formula->literals);
+
+	free(formula);
+}
+
+static int find_nlit_per_clause(FILE *file);
+
+static int lits_per_clause = 0;
+
+static Formula *
+create_formula(FILE *file, int nclauses, int nvariables)
+{
+	Formula *formula;
+	int		nlit_per_clause; /* # of literals per clause */
+	int		nlit_total; /* total # of literals in formula */
+
+	if ((nlit_per_clause = find_nlit_per_clause(file)) == 0)
+		ereport_and_exit("Invalid file format", 0);
+
+	nlit_total = nlit_per_clause * nclauses;
+
+	if ((formula = (Formula *) malloc(sizeof(Formula))) == NULL)
+		ereport_and_exit("Cannot allocate memory for Formula", NULL);
+
+	if ((formula->clauses = (Clause *)
+			malloc(sizeof(Clause) * nclauses)) == NULL)
+	{
+		drop_formula(formula);
+		ereport_and_exit("Cannot allocate memory for Clauses", NULL);
+	}
+
+	if ((formula->literals = (Literal *)
+			malloc(sizeof(Literal) * nlit_total)) == NULL)
+	{
+		drop_formula(formula);
+		ereport_and_exit("Cannot allocate memory for literals", NULL);
+	}
+
+	/* Fill remaining fields */
+	formula->nclauses = nclauses;
+	lits_per_clause = nlit_per_clause;
+	formula->nlit_total = nlit_total;
+
+	return formula;
+}
+
 typedef enum AssignmentType
 {
 	VAL_PROPAGATION = 1,
@@ -112,8 +168,6 @@ typedef struct AssignmentStack
 }		AssignmentStack;
 
 #define STACK_MAX_CAPACITY	255
-
-static int lits_per_clause = 0;
 
 static void
 push(AssignmentStack *stack, Assignment *s)
@@ -146,53 +200,6 @@ static bool
 stack_is_empty(AssignmentStack *stack)
 {
 	return stack->depth == 0;
-}
-
-static void
-revert_change(Formula *formula, Assignment a)
-{
-	for (int i = 0; i < formula->nlit_total; i++)
-	{
-		Literal *l = &formula->literals[i];
-
-		if (l->stack_depth != a.stack_depth)
-			continue;
-
-		if (!LiteralIsInUse(l))
-		{
-			LiteralSetUsed(l);
-			formula->clauses[i / lits_per_clause].n_in_use += 1;
-		}
-
-		if (l->name == a.literal_name)
-			l->assigned_value = a.oldval;
-	}
-}
-
-// TODO delete it
-static void
-print_formula(Formula *f, char *additional_str)
-{
-	// if (additional_str != NULL)
-	// 	printf("%s\n", additional_str);
-
-	// for (int i = 0; i < f->nclauses; i++)
-	// {
-	// 	Clause *cl = &f->clauses[i];
-	// 	for (int j = 0; j < lits_per_clause; j++)
-	// 	{
-	// 		if (!LiteralIsInUse(&cl->literals[j]))
-	// 			continue;
-
-	// 		printf("%s%d %s",
-	// 				cl->literals[j].is_negated ? "NOT " : "",
-	// 				cl->literals[j].name,
-	// 				j == lits_per_clause - 1 ? "\n" : "OR ");
-	// 	}
-	// 	// printf(" (in use %d)\n", cl->n_in_use);
-	// }
-
-	// printf("============\n\n");
 }
 
 /*
@@ -315,6 +322,27 @@ read_next_val(FILE *file, int *val)
 }
 
 static void
+revert_change(Formula *formula, Assignment a)
+{
+	for (int i = 0; i < formula->nlit_total; i++)
+	{
+		Literal *l = &formula->literals[i];
+
+		if (l->stack_depth != a.stack_depth)
+			continue;
+
+		if (!LiteralIsInUse(l))
+		{
+			LiteralSetUsed(l);
+			formula->clauses[i / lits_per_clause].n_in_use += 1;
+		}
+
+		if (l->name == a.literal_name)
+			l->assigned_value = a.oldval;
+	}
+}
+
+static void
 delete_clause_from_formula(Formula *formula, Clause *clause,
 						   unsigned char stack_depth)
 {
@@ -351,57 +379,7 @@ clause_gives_false(Clause *cl)
 
 static bool propagate_literal_value(Formula *formula, Assignment a);
 
-static void
-drop_formula(Formula *formula)
-{
-	if (formula == NULL)
-		return;
 
-	if (formula->clauses != NULL)
-		free(formula->clauses);
-
-	if (formula->literals != NULL)
-		free(formula->literals);
-
-	free(formula);
-}
-
-static Formula *
-create_formula(FILE *file, int nclauses, int nvariables)
-{
-	Formula *formula;
-	int		nlit_per_clause; /* # of literals per clause */
-	int		nlit_total; /* total # of literals in formula */
-
-	if ((nlit_per_clause = find_nlit_per_clause(file)) == 0)
-		ereport_and_exit("Invalid file format", 0);
-
-	nlit_total = nlit_per_clause * nclauses;
-
-	if ((formula = (Formula *) malloc(sizeof(Formula))) == NULL)
-		ereport_and_exit("Cannot allocate memory for Formula", NULL);
-
-	if ((formula->clauses = (Clause *)
-			malloc(sizeof(Clause) * nclauses)) == NULL)
-	{
-		drop_formula(formula);
-		ereport_and_exit("Cannot allocate memory for Clauses", NULL);
-	}
-
-	if ((formula->literals = (Literal *)
-			malloc(sizeof(Literal) * nlit_total)) == NULL)
-	{
-		drop_formula(formula);
-		ereport_and_exit("Cannot allocate memory for literals", NULL);
-	}
-
-	/* Fill remaining fields */
-	formula->nclauses = nclauses;
-	lits_per_clause = nlit_per_clause;
-	formula->nlit_total = nlit_total;
-
-	return formula;
-}
 
 /*
  * Returns false iff we found the polar pair.
@@ -437,8 +415,11 @@ retry:
 
 			target_literal_name = literal->name;
 			value_to_assign = !(literal->is_negated);
+			break;
 		}
-		break;
+
+		if (target_literal_name != InvalidLiteralName)
+			break;
 	}
 
 	if (target_literal_name == InvalidLiteralName)
@@ -606,8 +587,6 @@ dpll(FILE *file, int nclauses, int nvariables)
 		unsigned char next_literal;
 		Assignment a;
 
-		print_formula(formula, "cycle head");
-
 		a.literal_name = find_unassigned_literal(formula);
 		if (a.literal_name == InvalidLiteralName)
 		{
@@ -629,7 +608,7 @@ dpll(FILE *file, int nclauses, int nvariables)
 		a = revert_literal_propagation(formula, &stack);
 
 retry:
-		a.oldval = VAL_TRUE;
+		a.oldval = VAL_UNASSIGNED;
 		a.newval = VAL_FALSE;
 		a.type = VAL_PROPAGATION;
 		push(&stack, &a);
@@ -640,9 +619,7 @@ retry:
 				continue;
 		}
 
-
 		a = revert_literal_propagation(formula, &stack);
-		print_formula(formula, "reverted false val");
 
 		do
 		{
