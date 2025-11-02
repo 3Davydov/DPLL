@@ -18,10 +18,17 @@ do { \
 	return (return_val); \
 } while (0)
 
+typedef enum AssignedValue
+{
+	VAL_UNASSIGNED = -1,
+	VAL_FALSE = 0,
+	VAL_TRUE = 1,
+}		AssignedValue;
+
 typedef struct Literal
 {
 	unsigned char	name;
-	char			assigned_value;
+	AssignedValue	assigned_value;
 	bool			is_negated;
 
 	/*
@@ -30,12 +37,6 @@ typedef struct Literal
 	 */
 	unsigned char	stack_depth;
 }		Literal;
-
-/* List values that can be assigned to a literal. */
-#define VAL_FALSE		0
-#define	VAL_TRUE		1
-/* Special value for literal, for which we did not assign any value. */
-#define	VAL_UNASSIGNED	-1
 
 #define LiteralGivesTrue(literal_ptr) \
 	(((literal_ptr)->assigned_value == VAL_FALSE && \
@@ -88,15 +89,18 @@ typedef struct Formula
 	int				nlit_total;
 }		Formula;
 
-#define	VAL_PROPAGATION		1
-#define UNIT_PROPAGATION	2
+typedef enum AssignmentType
+{
+	VAL_PROPAGATION = 1,
+	UNIT_PROPAGATION = 2,
+}		AssignmentType;
 
 typedef struct Assignment
 {
 	unsigned char	literal_name;
 	char			oldval;
 	char			newval;
-	unsigned char	a_type; /* type of an assignment */
+	AssignmentType	type; /* type of an assignment */
 	unsigned char	stack_depth;
 }		Assignment;
 
@@ -324,11 +328,11 @@ delete_clause_from_formula(Formula *formula, Clause *clause,
 }
 
 static bool
-clause_gives_false(Clause *cl, int nliterals)
+clause_gives_false(Clause *cl)
 {
 	bool	all_unused = true;
 
-	for (int i = 0; i < nliterals; i++)
+	for (int i = 0; i < lits_per_clause; i++)
 	{
 		if (!LiteralIsInUse(&cl->literals[i]))
 			continue;
@@ -440,7 +444,7 @@ retry:
 	if (target_literal_name == InvalidLiteralName)
 		return no_empty_clauses;
 
-	a.a_type = UNIT_PROPAGATION;
+	a.type = UNIT_PROPAGATION;
 	a.oldval = VAL_UNASSIGNED;
 	a.newval = value_to_assign;
 	a.literal_name = target_literal_name;
@@ -504,7 +508,7 @@ propagate_literal_value(Formula *formula, Assignment a)
 			delete_clause_from_formula(formula, c, a.stack_depth);
 		else
 		{
-			if (clause_gives_false(c, lits_per_clause))
+			if (clause_gives_false(c))
 				no_empty_clause = false;
 
 			/* Delete literal from clause */
@@ -521,9 +525,22 @@ static Assignment
 revert_literal_propagation(Formula *formula, AssignmentStack *stack)
 {
 	Assignment a;
+
+	/* Revert unit propagations */
+	while (true)
+	{
+		a = peek(stack);
+
+		if (a.type != UNIT_PROPAGATION)
+			break;
+
+		a = pop(stack);
+		revert_change(formula, a);
+	}
+
 	a = pop(stack);
 
-	if (a.a_type != VAL_PROPAGATION)
+	if (a.type != VAL_PROPAGATION)
 	{
 		printf("Invalid assignment type in literal propagation reverting\n");
 		exit(1);
@@ -532,23 +549,6 @@ revert_literal_propagation(Formula *formula, AssignmentStack *stack)
 	revert_change(formula, a);
 
 	return a;
-}
-
-static void
-revert_unit_propagations(Formula *formula, AssignmentStack *stack)
-{
-	Assignment a;
-
-	while (true)
-	{
-		a = peek(stack);
-
-		if (a.a_type != UNIT_PROPAGATION)
-			break;
-
-		a = pop(stack);
-		revert_change(formula, a);
-	}
 }
 
 static int
@@ -617,42 +617,29 @@ dpll(FILE *file, int nclauses, int nvariables)
 
 		a.oldval = VAL_UNASSIGNED;
 		a.newval = VAL_TRUE;
-		a.a_type = VAL_PROPAGATION;
+		a.type = VAL_PROPAGATION;
 		push(&stack, &a);
 
 		if (propagate_literal_value(formula, a))
 		{
-			print_formula(formula, "true val works");
 			if (unit_propagate(formula, &stack))
-			{
-				print_formula(formula, "unit propagation works");
 				continue;
-			}
-			revert_unit_propagations(formula, &stack);
-			print_formula(formula, "reverted unit propagation");
 		}
 
 		a = revert_literal_propagation(formula, &stack);
-		print_formula(formula, "reverted true val");
 
 retry:
 		a.oldval = VAL_TRUE;
 		a.newval = VAL_FALSE;
-		a.a_type = VAL_PROPAGATION;
+		a.type = VAL_PROPAGATION;
 		push(&stack, &a);
 
 		if (propagate_literal_value(formula, a))
 		{
-			print_formula(formula, "false val works");
 			if (unit_propagate(formula, &stack))
-			{
-				print_formula(formula, "unit propagation works");
 				continue;
-			}
-
-			revert_unit_propagations(formula, &stack);
-			print_formula(formula, "reverted unit propagation");
 		}
+
 
 		a = revert_literal_propagation(formula, &stack);
 		print_formula(formula, "reverted false val");
@@ -662,7 +649,6 @@ retry:
 			if (stack_is_empty(&stack))
 				break;
 
-			revert_unit_propagations(formula, &stack);
 			a = revert_literal_propagation(formula, &stack);
 		} while (a.newval == VAL_FALSE);
 
