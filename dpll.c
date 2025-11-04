@@ -58,8 +58,7 @@ typedef struct Literal
 #define InvalidStackDepth	UINT_MAX
 
 #define LiteralIsInUse(literal_ptr) \
-	((literal_ptr)->stack_depth == InvalidStackDepth || \
-	 (literal_ptr)->variable->name == InvalidLiteralName)
+	((literal_ptr)->stack_depth == InvalidStackDepth)
 
 #define LiteralSetUnused(literal_ptr, stack_d) \
 do { \
@@ -78,6 +77,12 @@ typedef struct Clause
 	int			n_in_use;
 }		Clause;
 
+typedef struct LiteralFrequency
+{
+	unsigned int lname;
+	int			 freq;
+}		LiteralFrequency;
+
 typedef struct Formula
 {
 	/* List of all clauses within formula */
@@ -89,6 +94,7 @@ typedef struct Formula
 	 * Clause struct are only points to different places off arrays below.
 	 */
 	Variable		*variables;
+	LiteralFrequency	*lfrequency;
 
 	int				nclauses;
 	int				nvariables;
@@ -101,15 +107,24 @@ drop_formula(Formula *formula)
 	if (formula == NULL)
 		return;
 
+	for (int i = 0; i < formula->nclauses; i++)
+	{
+		if (formula->clauses[i].literals != NULL)
+			free(formula->clauses[i].literals);
+	}
+
+	for (int i = 0; i < formula->nvariables; i++)
+	{
+		if (formula->variables[i].related_clauses != NULL)
+			free(formula->variables[i].related_clauses);
+	}
+
 	if (formula->clauses != NULL)
 		free(formula->clauses);
 
 	if (formula->variables != NULL)
 		free(formula->variables);
 
-	// TODO add all appropriate memory free
-	// if (formula->assigned_values != NULL)
-	// 	free(formula->assigned_values);
 
 	free(formula);
 }
@@ -175,31 +190,6 @@ read_next_val(FILE *file, int *val)
 
 	return 1;
 }
-
-static void
-print_formula(Formula *f, char *additional_str)
-{
-	// if (additional_str != NULL)
-	// 	printf("%s\n", additional_str);
-
-	// for (int i = 0; i < f->nclauses; i++)
-	// {
-	// 	Clause *c = &f->clauses[i];
-	// 	for (int j = 0; j < c->n_literals; j++)
-	// 	{
-	// 		Literal *l = &c->literals[j];
-	// 		if (!LiteralIsInUse(l))
-	// 			continue;
-	// 		printf("%s%d%s",
-	// 			l->is_negated ? "NOT " : "",
-	// 			l->variable->name,
-	// 			j == c->n_literals - 1 ? "" : " OR ");
-	// 	}
-	// 	printf("\n");
-	// }
-	// printf("=============\n");
-}
-
 
 
 static Formula *
@@ -478,7 +468,6 @@ unit_propagate(Formula *formula, AssignmentStack *stack)
 {
 	unsigned int target_literal_name;
 	bool	value_to_assign;
-	bool	no_empty_clauses = true;
 	Assignment a;
 
 retry:
@@ -512,7 +501,7 @@ retry:
 	}
 
 	if (target_literal_name == InvalidLiteralName)
-		return no_empty_clauses;
+		return true;
 
 	a.type = UNIT_PROPAGATION;
 	a.oldval = VAL_UNASSIGNED;
@@ -521,7 +510,7 @@ retry:
 	push(stack, &a);
 
 	if (!propagate_literal_value(formula, a))
-		no_empty_clauses = false;
+		return false;
 
 	goto retry;
 
@@ -559,6 +548,10 @@ propagate_literal_value(Formula *formula, Assignment a)
 	for (int i = 0; i < v->nrelated_clauses; i++)
 	{
 		Clause *c = v->related_clauses[i];
+
+		if (c->n_in_use == 0)
+			continue;
+
 		for (int j = 0; j < c->n_literals; j++)
 		{
 			if (c->literals[j].variable->name != a.literal_name)
@@ -576,6 +569,7 @@ propagate_literal_value(Formula *formula, Assignment a)
 				LiteralSetUnused(&c->literals[j], a.stack_depth);
 				c->n_in_use -= 1;
 			}
+			break;
 		}
 	}
 
@@ -652,8 +646,6 @@ dpll(FILE *file, int nclauses, int nvariables)
 			break;
 		}
 
-		print_formula(formula, "cycle head");
-
 		a.oldval = VAL_UNASSIGNED;
 		a.newval = VAL_TRUE;
 		a.type = VAL_PROPAGATION;
@@ -661,16 +653,11 @@ dpll(FILE *file, int nclauses, int nvariables)
 
 		if (propagate_literal_value(formula, a))
 		{
-			print_formula(formula, "true val works 1");
 			if (unit_propagate(formula, &stack))
-			{
-				print_formula(formula, "true val works 2");
 				continue;
-			}
 		}
 
 		a = revert_literal_propagation(formula, &stack);
-		print_formula(formula, "revert");
 
 retry:
 		a.oldval = VAL_UNASSIGNED;
@@ -680,16 +667,11 @@ retry:
 
 		if (propagate_literal_value(formula, a))
 		{
-			print_formula(formula, "false val works 1");
 			if (unit_propagate(formula, &stack))
-			{
-				print_formula(formula, "false val works 2");
 				continue;
-			}
 		}
 
 		a = revert_literal_propagation(formula, &stack);
-		print_formula(formula, "revert");
 
 		do
 		{
@@ -697,7 +679,6 @@ retry:
 				break;
 
 			a = revert_literal_propagation(formula, &stack);
-			print_formula(formula, "revert in cycle");
 		} while (a.newval == VAL_FALSE);
 
 		if (stack_is_empty(&stack))
