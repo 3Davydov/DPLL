@@ -26,24 +26,27 @@ typedef enum AssignedValue
 	VAL_TRUE = 1,
 }		AssignedValue;
 
+typedef struct Clause Clause;
+
+typedef struct Variable
+{
+	unsigned int name;
+	AssignedValue	assigned_value;
+	unsigned int	nrelated_clauses;
+	Clause 			**related_clauses;
+}		Variable;
+
 typedef struct Literal
 {
-	unsigned int	name;
+	Variable		*variable;
 	bool			is_negated;
-
-	AssignedValue	assigned_value;
-
-	/*
-	 * Stack depth is assigned when we get rid of this literal during clause
-	 * simplification.
-	 */
 	unsigned int	stack_depth;
 }		Literal;
 
 #define LiteralGivesTrue(literal_ptr) \
-	(((literal_ptr)->assigned_value == VAL_FALSE && \
+	(((literal_ptr)->variable->assigned_value == VAL_FALSE && \
 	  (literal_ptr)->is_negated) || \
-	 ((literal_ptr)->assigned_value == VAL_TRUE && \
+	 ((literal_ptr)->variable->assigned_value == VAL_TRUE && \
 	  !(literal_ptr)->is_negated))
 
 #define InvalidLiteralName	0
@@ -56,7 +59,7 @@ typedef struct Literal
 
 #define LiteralIsInUse(literal_ptr) \
 	((literal_ptr)->stack_depth == InvalidStackDepth || \
-	 (literal_ptr)->name == InvalidLiteralName)
+	 (literal_ptr)->variable->name == InvalidLiteralName)
 
 #define LiteralSetUnused(literal_ptr, stack_d) \
 do { \
@@ -71,9 +74,8 @@ do { \
 typedef struct Clause
 {
 	Literal		*literals;
-	/* Number of literals that are actually in the clause */
-	int			n_in_use;
 	int			n_literals;
+	int			n_in_use;
 }		Clause;
 
 typedef struct Formula
@@ -86,10 +88,11 @@ typedef struct Formula
 	 * for literals and their values as a one big chuck. Thus, pointers in
 	 * Clause struct are only points to different places off arrays below.
 	 */
-	Literal		*literals;
+	Variable		*variables;
 
 	int				nclauses;
-	int				nlit_total;
+	int				nvariables;
+	int				nliterals_total;
 }		Formula;
 
 static void
@@ -101,22 +104,112 @@ drop_formula(Formula *formula)
 	if (formula->clauses != NULL)
 		free(formula->clauses);
 
-	if (formula->literals != NULL)
-		free(formula->literals);
+	if (formula->variables != NULL)
+		free(formula->variables);
+
+	// TODO add all appropriate memory free
+	// if (formula->assigned_values != NULL)
+	// 	free(formula->assigned_values);
 
 	free(formula);
 }
 
-static int find_nlit_total(FILE *file);
+static void
+add_related_clause(Clause *c, Variable *v)
+{
+	if (v->related_clauses == NULL)
+		v->related_clauses = (Clause **) malloc(sizeof(Clause *));
+	else
+		v->related_clauses = (Clause **)
+			realloc(v->related_clauses,
+					sizeof(Clause *) * (v->nrelated_clauses + 1));
+
+	if (v->related_clauses == NULL)
+	{
+		printf("cannot allocate memory for related clauses\n");
+		exit(1);
+	}
+
+	v->related_clauses[v->nrelated_clauses] = c;
+	v->nrelated_clauses += 1;
+}
+
+static void
+add_related_literal(Clause *c, Literal l)
+{
+	if (c->literals == NULL)
+		c->literals = (Literal *) malloc(sizeof(Literal));
+	else
+		c->literals = (Literal *)
+			realloc(c->literals, sizeof(Literal) * (c->n_literals + 1));
+
+	if (c->literals == NULL)
+	{
+		printf("cannot allocate memory for related literals\n");
+		exit(1);
+	}
+
+	c->literals[c->n_literals] = l;
+	c->n_literals += 1;
+	c->n_in_use += 1;
+}
+
+/*
+ * Read next value from DIMACS-formatted file.
+ * Reutns 0 on eof, 1 on success.
+ */
+static int
+read_next_val(FILE *file, int *val)
+{
+	while (true)
+	{
+		int rc = fscanf(file, "%d", val);
+
+		/* EOF or some another delimeter encountered */
+		if (feof(file) || rc != 1)
+			return 0;
+		/* All good - we read the value */
+		else
+			break;
+	}
+
+	return 1;
+}
+
+static void
+print_formula(Formula *f, char *additional_str)
+{
+	// if (additional_str != NULL)
+	// 	printf("%s\n", additional_str);
+
+	// for (int i = 0; i < f->nclauses; i++)
+	// {
+	// 	Clause *c = &f->clauses[i];
+	// 	for (int j = 0; j < c->n_literals; j++)
+	// 	{
+	// 		Literal *l = &c->literals[j];
+	// 		if (!LiteralIsInUse(l))
+	// 			continue;
+	// 		printf("%s%d%s",
+	// 			l->is_negated ? "NOT " : "",
+	// 			l->variable->name,
+	// 			j == c->n_literals - 1 ? "" : " OR ");
+	// 	}
+	// 	printf("\n");
+	// }
+	// printf("=============\n");
+}
+
+
 
 static Formula *
 create_formula(FILE *file, int nclauses, int nvariables)
 {
 	Formula *formula;
-	int		nlit_total; /* total # of literals in formula */
-
-	if ((nlit_total = find_nlit_total(file)) == 0)
-		ereport_and_exit("Invalid file format", 0);
+	Clause *c;
+	int		rc;
+	int val;
+	unsigned int current_clause = 0;
 
 	if ((formula = (Formula *) malloc(sizeof(Formula))) == NULL)
 		ereport_and_exit("Cannot allocate memory for Formula", NULL);
@@ -128,16 +221,61 @@ create_formula(FILE *file, int nclauses, int nvariables)
 		ereport_and_exit("Cannot allocate memory for Clauses", NULL);
 	}
 
-	if ((formula->literals = (Literal *)
-			malloc(sizeof(Literal) * nlit_total)) == NULL)
+	for (int i = 0; i < nclauses; i++)
+	{
+		Clause c = {
+			.literals = NULL,
+			.n_literals = 0,
+			.n_in_use = 0,
+		};
+		formula->clauses[i] = c;
+	}
+
+	if ((formula->variables = (Variable *)
+			malloc(sizeof(Variable) * nvariables)) == NULL)
 	{
 		drop_formula(formula);
 		ereport_and_exit("Cannot allocate memory for literals", NULL);
 	}
 
+	for (unsigned int i = 0; i < nvariables; i++)
+	{
+		Variable v = {
+			.assigned_value = VAL_UNASSIGNED,
+			.name = i + 1,
+			.nrelated_clauses = 0,
+			.related_clauses = NULL,
+		};
+		formula->variables[i] = v;
+	}
+
 	/* Fill remaining fields */
 	formula->nclauses = nclauses;
-	formula->nlit_total = nlit_total;
+	formula->nvariables = nvariables;
+
+	c = &formula->clauses[current_clause];
+
+	while ((rc = read_next_val(file, &val)) == 1)
+	{
+		unsigned int lname = val > 0 ? val : val * (-1);
+		Literal l = {
+			.variable = &formula->variables[lname - 1],
+			.is_negated = (val < 0),
+			.stack_depth = InvalidStackDepth,
+		};
+
+		if (val == 0)
+		{
+			if (++current_clause >= nclauses)
+				break;
+
+			c = &formula->clauses[current_clause];
+			continue;
+		}
+
+		add_related_clause(c, l.variable);
+		add_related_literal(c, l);
+	}
 
 	return formula;
 }
@@ -150,10 +288,10 @@ typedef enum AssignmentType
 
 typedef struct Assignment
 {
-	unsigned int	literal_name;
-	char			oldval;
-	char			newval;
+	AssignedValue	oldval;
+	AssignedValue	newval;
 	AssignmentType	type; /* type of an assignment */
+	unsigned int	literal_name;
 	unsigned int	stack_depth;
 }		Assignment;
 
@@ -268,66 +406,14 @@ skip_comments(FILE *file)
 	return 1;
 }
 
-static int
-find_nlit_total(FILE *file)
-{
-	fpos_t	current_pos;
-	int val;
-	int	nlits = 0;
-
-	if (fgetpos(file, &current_pos) < 0)
-		ereport_and_exit("Cannot read file", 0);
-
-	while (true)
-	{
-		int rc = fscanf(file, "%d", &val);
-
-		if (rc != 1)
-			break;
-		else if (val == 0)
-			continue;
-		else
-			nlits++;
-
-		/* EOF or some another delimeter encountered */
-		if (feof(file) || val == 0 || rc != 1)
-			break;
-	}
-
-	if (fsetpos(file, &current_pos) < 0)
-		ereport_and_exit("Cannot read file", 0);
-
-	return nlits;
-}
-
-/*
- * Read next value from DIMACS-formatted file.
- * Reutns 0 on eof, 1 on success.
- */
-static int
-read_next_val(FILE *file, int *val)
-{
-	while (true)
-	{
-		int rc = fscanf(file, "%d", val);
-
-		/* EOF or some another delimeter encountered */
-		if (feof(file) || rc != 1)
-			return 2;
-		/* All good - we read the value */
-		else
-			break;
-	}
-
-	return 1;
-}
-
 static void
 revert_change(Formula *formula, Assignment a)
 {
-	for (int i = 0; i < formula->nclauses; i++)
+	Variable *v = &formula->variables[a.literal_name - 1];
+
+	for (int i = 0; i < v->nrelated_clauses; i++)
 	{
-		Clause *c = &formula->clauses[i];
+		Clause *c = v->related_clauses[i];
 		for (int j = 0; j < c->n_literals; j++)
 		{
 			Literal *l = &c->literals[j];
@@ -341,8 +427,8 @@ revert_change(Formula *formula, Assignment a)
 				c->n_in_use += 1;
 			}
 
-			if (l->name == a.literal_name)
-				l->assigned_value = a.oldval;
+			if (l->variable->name == a.literal_name)
+				l->variable->assigned_value = a.oldval;
 		}
 	}
 }
@@ -372,7 +458,7 @@ clause_gives_false(Clause *cl)
 
 		all_unused = false;
 
-		if (cl->literals[i].assigned_value == VAL_UNASSIGNED)
+		if (cl->literals[i].variable->assigned_value == VAL_UNASSIGNED)
 			return false;
 
 		if (LiteralGivesTrue(&cl->literals[i]))
@@ -383,8 +469,6 @@ clause_gives_false(Clause *cl)
 }
 
 static bool propagate_literal_value(Formula *formula, Assignment a);
-
-
 
 /*
  * Returns false iff we found the polar pair.
@@ -418,7 +502,7 @@ retry:
 			if (!LiteralIsInUse(literal))
 				continue;
 
-			target_literal_name = literal->name;
+			target_literal_name = literal->variable->name;
 			value_to_assign = !(literal->is_negated);
 			break;
 		}
@@ -450,14 +534,11 @@ find_unassigned_literal(Formula *formula)
 {
 	unsigned int lname = InvalidLiteralName;
 
-	for (int i = 0; i < formula->nlit_total; i++)
+	for (int i = 0; i < formula->nvariables; i++)
 	{
-		if (!LiteralIsInUse(&formula->literals[i]))
-			continue;
-
-		if (formula->literals[i].assigned_value == VAL_UNASSIGNED)
+		if (formula->variables[i].assigned_value == VAL_UNASSIGNED)
 		{
-			lname = formula->literals[i].name;
+			lname = formula->variables[i].name;
 			break;
 		}
 	}
@@ -471,36 +552,27 @@ find_unassigned_literal(Formula *formula)
 static bool
 propagate_literal_value(Formula *formula, Assignment a)
 {
+	Variable *v = &formula->variables[a.literal_name - 1];
+	v->assigned_value = a.newval;
 	bool	no_empty_clause = true;
 
-	for (int i = 0; i < formula->nclauses; i++)
+	for (int i = 0; i < v->nrelated_clauses; i++)
 	{
-		Clause *c = &formula->clauses[i];
+		Clause *c = v->related_clauses[i];
 		for (int j = 0; j < c->n_literals; j++)
 		{
-			if (c->literals[j].name != a.literal_name ||
-				!LiteralIsInUse(&c->literals[j]))
-			{
-				/*
-				 * Skip not matched literals and literals that are not actually
-				 * in the clause.
-				 */
+			if (c->literals[j].variable->name != a.literal_name)
 				continue;
-			}
 
-			c->literals[j].assigned_value = a.newval;
+			if (!LiteralIsInUse(&c->literals[j]))
+				continue;
 
 			if (LiteralGivesTrue(&c->literals[j]))
-			{
 				delete_clause_from_formula(formula, c, a.stack_depth);
-				break;
-			}
 			else
 			{
 				if (clause_gives_false(c))
 					no_empty_clause = false;
-
-				/* Delete literal from clause */
 				LiteralSetUnused(&c->literals[j], a.stack_depth);
 				c->n_in_use -= 1;
 			}
@@ -567,37 +639,6 @@ dpll(FILE *file, int nclauses, int nvariables)
 		ereport_and_exit("Cannot allocate memory for assignment stack", 0);
 	}
 
-	while ((rc = read_next_val(file, &val)) == 1)
-	{
-		Literal		l = {
-			.name			= val > 0 ? val : val * (-1),
-			.is_negated		= (val < 0),
-			.stack_depth	= InvalidStackDepth,
-			.assigned_value = VAL_UNASSIGNED,
-		};
-
-		if (val == 0)
-		{
-			Clause *c = &formula->clauses[cc++];
-			c->literals = &formula->literals[i - nlits_in_clause];
-			c->n_in_use = nlits_in_clause;
-			c->n_literals = nlits_in_clause;
-
-			nlits_in_clause = 0; /* reset */
-			continue;
-		}
-
-		if (val > nvariables)
-		{
-			ereport("Invalid file format");
-			goto exit;
-		}
-
-		formula->literals[i] = l;
-		nlits_in_clause += 1;
-
-		i++;
-	}
 
 	while (true)
 	{
@@ -611,6 +652,8 @@ dpll(FILE *file, int nclauses, int nvariables)
 			break;
 		}
 
+		print_formula(formula, "cycle head");
+
 		a.oldval = VAL_UNASSIGNED;
 		a.newval = VAL_TRUE;
 		a.type = VAL_PROPAGATION;
@@ -618,11 +661,16 @@ dpll(FILE *file, int nclauses, int nvariables)
 
 		if (propagate_literal_value(formula, a))
 		{
+			print_formula(formula, "true val works 1");
 			if (unit_propagate(formula, &stack))
+			{
+				print_formula(formula, "true val works 2");
 				continue;
+			}
 		}
 
 		a = revert_literal_propagation(formula, &stack);
+		print_formula(formula, "revert");
 
 retry:
 		a.oldval = VAL_UNASSIGNED;
@@ -632,11 +680,16 @@ retry:
 
 		if (propagate_literal_value(formula, a))
 		{
+			print_formula(formula, "false val works 1");
 			if (unit_propagate(formula, &stack))
+			{
+				print_formula(formula, "false val works 2");
 				continue;
+			}
 		}
 
 		a = revert_literal_propagation(formula, &stack);
+		print_formula(formula, "revert");
 
 		do
 		{
@@ -644,6 +697,7 @@ retry:
 				break;
 
 			a = revert_literal_propagation(formula, &stack);
+			print_formula(formula, "revert in cycle");
 		} while (a.newval == VAL_FALSE);
 
 		if (stack_is_empty(&stack))
